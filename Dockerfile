@@ -1,18 +1,21 @@
-FROM node:18-bullseye
+# imagem base leve
+FROM node:18-alpine
 
-# libs necessárias ao Chromium + ffmpeg
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    ca-certificates fonts-liberation libappindicator3-1 libasound2 \
-    libatk-bridge2.0-0 libatk1.0-0 libcairo2 libcups2 \
-    libdrm2 libgbm1 libgtk-3-0 libnspr4 libnss3 libx11-xcb1 \
-    libxdamage1 libxrandr2 libxkbcommon0 xdg-utils --no-install-recommends \
-  && rm -rf /var/lib/apt/lists/*
-
+# diretório de trabalho
 WORKDIR /app
-COPY package*.json ./
+
+# 1) copie package.json e package-lock.json
+COPY package.json package-lock.json ./
+
+# 2) instale só deps de produção
 RUN npm ci --production
+
+# 3) copie o restante do código
 COPY . .
 
-ENV SESSION_PATH=/data
-CMD ["node","index.js"]
+# variável de porta
+ENV PORT=3000
+EXPOSE 3000
+
+# 4) startup
+CMD ["npm", "start"]
