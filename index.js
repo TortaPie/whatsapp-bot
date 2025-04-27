@@ -5,7 +5,20 @@ const sharp  = require('sharp');
 const fs     = require('fs');
 const path   = require('path');
 
-const client = new Client({ authStrategy: new LocalAuth() });
+// Inicialização do Client com flags para rodar como root
+const client = new Client({
+  authStrategy: new LocalAuth(),
+  puppeteer: {
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--single-process'
+    ]
+  }
+});
 
 client.on('qr', qr => {
   qrcode.generate(qr, { small: true });
