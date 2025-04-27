@@ -3,214 +3,186 @@ const qrcode = require('qrcode-terminal');
 const QRCode = require('qrcode');
 const express = require('express');
 const http = require('http');
-const fs = require('fs');
+const fs = require('fs').promises;
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
 const sharp = require('sharp');
 
-// --- SERVIDOR EXPRESS PARA QR CODE ---
+// Express server for QR code
 const app = express();
 let currentQr = null;
-
-// Página HTML com QR Code
 app.get('/', (req, res) => {
-  if (!currentQr) return res.send('🔄 QR code ainda não gerado. Aguarde...');
+  if (!currentQr) return res.send('QR code ainda não gerado. Aguarde.');
   res.send(`
-    <h1>📲 QR Code para PieBot</h1>
+    <h1>WhatsApp Web QR Code</h1>
     <img src="/qr.png" alt="QR Code" />
-    <p>Escaneie com seu WhatsApp Mobile para conectar o bot.</p>
+    <p>Escaneie com seu WhatsApp Mobile</p>
   `);
 });
-
-// Serve o QR Code como imagem PNG
 app.get('/qr.png', (req, res) => {
-  if (!currentQr) return res.status(404).send('❌ QR não disponível');
+  if (!currentQr) return res.status(404).send('QR não disponível');
   res.type('png');
   QRCode.toFileStream(res, currentQr);
 });
-
-// Tratamento de erros no servidor e no processo
-process.on('uncaughtException', err => console.error('❌ Uncaught Exception:', err));
-process.on('unhandledRejection', reason => console.error('❌ Unhandled Rejection:', reason));
-
-// Inicia servidor HTTP com tratamento de erros
 const port = process.env.PORT || 3000;
-const server = app.listen(port, '0.0.0.0', () => {
-  console.log(`🌐 Servidor HTTP iniciado na porta ${port}`);
-  // Keep-alive interno
-  const keepAlive = setInterval(() => {
-    http.get(`http://localhost:${port}/`).on('error', () => {});
-  }, 4 * 60 * 1000);
-  keepAlive.unref();
-});
-server.on('error', err => console.error('❌ Erro no servidor Express:', err));
+const server = app.listen(port, '0.0.0.0', () => console.log(`Servidor HTTP na porta ${port}`));
+server.on('error', err => console.error('Erro no Express:', err));
 
-// --- INICIALIZAÇÃO DO BOT WHATSAPP ---
+// Media processors
+async function processStatic(buffer) {
+  return sharp(buffer)
+    .resize(512, 512, { fit: 'cover' })
+    .webp({ quality: 90 })
+    .toBuffer();
+}
+
+function processGif(inPath, outPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg(inPath)
+      .outputOptions([
+        '-vcodec libwebp','-lossless 0','-q:v 50','-compression_level 6','-loop 0',
+        '-preset default','-an','-vsync 0','-vf fps=10,scale=512:512:flags=lanczos'
+      ])
+      .on('end', () => resolve())
+      .on('error', reject)
+      .save(outPath);
+  });
+}
+
+function processVideo(inPath, transPath, outPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg(inPath)
+      .outputOptions([
+        '-c:v libx264','-preset ultrafast','-profile:v baseline','-level 3.0',
+        '-pix_fmt yuv420p','-movflags +faststart','-an'
+      ])
+      .on('end', () => {
+        ffmpeg(transPath)
+          .inputOptions(['-t', '10'])
+          .videoCodec('libwebp')
+          .outputOptions([
+            '-vf fps=10,scale=512:512:flags=lanczos','-lossless 0',
+            '-compression_level 6','-q:v 50','-loop 0'
+          ])
+          .on('end', resolve)
+          .on('error', reject)
+          .save(outPath);
+      })
+      .on('error', reject)
+      .save(transPath);
+  });
+}
+
+// WhatsApp client
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
   puppeteer: {
     headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--single-process',
-      '--no-zygote',
-      '--no-zygote-sandbox'
-    ]
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--single-process']
   }
 });
 
-// Geração de QR Code
 client.on('qr', qr => {
   currentQr = qr;
   qrcode.generate(qr, { small: true });
-  console.log('📲 QR code gerado e disponível em /');
+  console.log('QR code gerado');
 });
-client.on('ready', () => console.log('✅ PieBot conectado!'));
+client.on('ready', () => console.log('Bot conectado!'));
 
 client.on('message', async msg => {
-  console.log(`📩 Mensagem de ${msg.from} | tipo: ${msg.type} | corpo: ${msg.body}`);
-  const cmd = (msg.body || '').trim().toLowerCase();
-
-  // Comando de apresentação
-  if (cmd === '!start') {
+  const text = (msg.body || '').trim().toLowerCase();
+  if (text === '!start') {
     return msg.reply(
-      '🌟 *Olá, sou PieBot, um robozinho muito gostoso!* 🌟\n' +
-      '\n' +
-      '✨ *Figurinhas animadas* funcionam apenas com arquivos enviados como *Documento* (GIF ou MP4).\n' +
-      '⏱️ *Vídeos .mp4* têm duração máxima de *9 segundos*.\n' +
-      '📨 Envie seu arquivo junto com o comando *!sticker* para eu processar e enviar sua figurinha animada!'
+      '✨ *Olá, sou PieBot, um robozinho muito gostoso!* ✨\n' +
+      '• Figurinhas animadas só com DOCUMENTOS (GIF ou MP4)\n' +
+      '• MP4: máximo de 9 segundos\n' +
+      'Envie !sticker + seu arquivo!'
     );
   }
-
-  if (cmd !== '!sticker' && cmd !== '!figurinha') return;
-
-  // Detecta sticker nativo
+  if (text !== '!sticker' && text !== '!figurinha') return;
   if (msg.type === 'sticker') {
-    return msg.reply('❌ Não converto stickers prontos. Envie imagem, GIF ou vídeo como documento.');
+    return msg.reply('❌️ Enviei um sticker pronto? Use GIF ou vídeo como documento.');
   }
 
-  // Captura mídia (mensagem ou reply)
   let source = msg;
   if (!msg.hasMedia && msg.hasQuotedMsg) {
-    const quoted = await msg.getQuotedMessage();
-    if (quoted.hasMedia) source = quoted;
+    const q = await msg.getQuotedMessage(); if (q.hasMedia) source = q;
   }
   if (!source.hasMedia) {
-    return msg.reply('❌ Envie uma mídia (imagem, GIF ou vídeo) junto ao !sticker ou em resposta a uma mídia.');
+    return msg.reply('❌️ Envie uma mídia junto com !sticker.');
   }
 
-  // Processo de mídia
-  console.log('⬇️ Baixando mídia...');
   let media;
-  try {
-    media = await source.downloadMedia();
-  } catch (e) {
-    console.error('❌ Falha ao baixar mídia:', e);
-    return msg.reply('❌ Não foi possível baixar a mídia.');
-  }
+  try { media = await source.downloadMedia(); }
+  catch { return msg.reply('❌️ Falha ao baixar mídia.'); }
   if (!media || !media.data) {
-    if (source.type === 'image') return msg.reply('⚠️ GIF inline não suportado. Envie como Documento (.gif).');
-    if (source.type === 'video') return msg.reply('⚠️ Vídeo da câmera não suportado. Envie como Documento (.mp4).');
-    return msg.reply('⚠️ Mídia inválida. Por favor, envie como Documento.');
+    return msg.reply('⚠️️ Mídia indisponível. Use documento.');
   }
 
   const mime = media.mimetype;
+  const buf = Buffer.from(media.data, 'base64');
   const filename = (source.filename || '').toLowerCase();
-  const buffer = Buffer.from(media.data, 'base64');
 
-  // Sticker estático (imagem)
+  // Static image
   if (mime.startsWith('image/') && !mime.includes('gif')) {
     try {
-      const webp = await sharp(buffer).resize(512, 512, { fit: 'cover' }).webp({ quality: 90 }).toBuffer();
-      return msg.reply(new MessageMedia('image/webp', webp.toString('base64')), undefined, { sendMediaAsSticker: true });
-    } catch (e) {
-      console.error('❌ Erro estática:', e);
-      return msg.reply('❌ Falha ao gerar figurinha estática.');
-    }
-  }
-
-  // Sticker animado (GIF)
-  if (mime.includes('gif') || filename.endsWith('.gif')) {
-    const tmpIn = path.join(__dirname, 'in.gif');
-    const tmpOut = path.join(__dirname, 'out.webp');
-    fs.writeFileSync(tmpIn, buffer);
-    try {
-      await new Promise((res, rej) => {
-        ffmpeg(tmpIn)
-          .outputOptions([
-            '-vcodec', 'libwebp', '-lossless', '0', '-q:v', '50', '-compression_level', '6',
-            '-loop', '0', '-preset', 'default', '-an', '-vsync', '0',
-            '-vf', 'fps=10,scale=512:512:flags=lanczos'
-          ])
-          .on('end', res)
-          .on('error', rej)
-          .save(tmpOut);
-      });
-      const webpBuf = fs.readFileSync(tmpOut);
-      return msg.reply(new MessageMedia('image/webp', webpBuf.toString('base64')), undefined, { sendMediaAsSticker: true });
-    } catch (e) {
-      console.error('❌ Erro GIF:', e);
-      return msg.reply('❌ Falha ao gerar figurinha do GIF.');
-    } finally {
-      fs.unlinkSync(tmpIn);
-      fs.unlinkSync(tmpOut);
-    }
-  }
-
-  // Sticker animado (vídeo)
-  if (mime.startsWith('video/')) {
-    const tmpIn = path.join(__dirname, filename.endsWith('.mov') ? 'in.mov' : 'in.mp4');
-    const tmpTrans = path.join(__dirname, 'trans.mp4');
-    const tmpOut = path.join(__dirname, 'out.webp');
-    fs.writeFileSync(tmpIn, buffer);
-    let duration = 0;
-    try {
-      const info = await new Promise((res, rej) => ffmpeg.ffprobe(tmpIn, (err, data) => err ? rej(err) : res(data)));
-      duration = info.format.duration;
+      const result = await processStatic(buf);
+      return msg.reply(new MessageMedia('image/webp', result.toString('base64')), undefined, { sendMediaAsSticker: true });
     } catch {
-      duration = 10;
-    }
-    if (duration > 10) {
-      fs.unlinkSync(tmpIn);
-      return msg.reply('⚠️ Vídeos devem ter no máximo 10 segundos (.mp4 ou .mov).');
-    }
-    try {
-      await new Promise((res, rej) => {
-        ffmpeg(tmpIn)
-          .outputOptions([
-            '-c:v', 'libx264', '-preset', 'ultrafast', '-profile:v', 'baseline', '-level', '3.0',
-            '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an'
-          ])
-          .on('end', res)
-          .on('error', rej)
-          .save(tmpTrans);
-      });
-      await new Promise((res, rej) => {
-        ffmpeg(tmpTrans)
-          .inputOptions(['-t', '10'])
-          .videoCodec('libwebp')
-          .outputOptions([
-            '-vf', 'fps=10,scale=512:512:flags=lanczos',
-            '-lossless', '0', '-compression_level', '6', '-q:v', '50', '-loop', '0'
-          ])
-          .on('end', res)
-          .on('error', rej)
-          .save(tmpOut);
-      });
-      const webpBuf = fs.readFileSync(tmpOut);
-      return msg.reply(new MessageMedia('image/webp', webpBuf.toString('base64')), undefined, { sendMediaAsSticker: true });
-    } catch (e) {
-      console.error('❌ Erro vídeo:', e);
-      return msg.reply('❌ Falha ao gerar figurinha animada do vídeo.');
-    } finally {
-      [tmpIn, tmpTrans, tmpOut].forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
+      return msg.reply('❌️ Erro na figurinha estática.');
     }
   }
 
-  return msg.reply('❌ Tipo não suportado.');
+  // GIF
+  if (mime.includes('gif') || filename.endsWith('.gif')) {
+    const inPath = path.join(__dirname, 'in.gif');
+    const outPath = path.join(__dirname, 'out.webp');
+    await fs.writeFile(inPath, buf);
+    try {
+      await processGif(inPath, outPath);
+      const wp = await fs.readFile(outPath);
+      return msg.reply(new MessageMedia('image/webp', wp.toString('base64')), undefined, { sendMediaAsSticker: true });
+    } catch {
+      return msg.reply('❌️ Erro ao processar GIF.');
+    } finally {
+      await fs.unlink(inPath); await fs.unlink(outPath);
+    }
+  }
+
+  // Video
+  if (mime.startsWith('video/')) {
+    const ext = filename.endsWith('.mov') ? 'mov' : 'mp4';
+    const inPath = path.join(__dirname, `in.${ext}`);
+    const transPath = path.join(__dirname, 'trans.mp4');
+    const outPath = path.join(__dirname, 'out.webp');
+    await fs.writeFile(inPath, buf);
+
+    let info;
+    try {
+      info = await new Promise((res, rej) => ffmpeg.ffprobe(inPath, (e, d) => e ? rej(e) : res(d)));
+    } catch {
+      info = { format: { duration: 10 } };
+    }
+    if (info.format.duration > 10) {
+      await fs.unlink(inPath);
+      return msg.reply('⚠️️ Vídeo maior que 10s não suportado.');
+    }
+
+    try {
+      await processVideo(inPath, transPath, outPath);
+      const wp = await fs.readFile(outPath);
+      return msg.reply(new MessageMedia('image/webp', wp.toString('base64')), undefined, { sendMediaAsSticker: true });
+    } catch {
+      return msg.reply('❌️ Erro ao processar vídeo.');
+    } finally {
+      for (const f of [inPath, transPath, outPath]) {
+        try { await fs.unlink(f); } catch {}
+      }
+    }
+  }
+
+  return msg.reply('❌️ Tipo não suportado.');
 });
 
 client.initialize();
