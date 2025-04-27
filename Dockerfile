@@ -5,6 +5,7 @@ WORKDIR /app
 # instala Chromium e libs necessárias
 RUN apt-get update && apt-get install -y \
     chromium \
+    ffmpeg \
     ca-certificates \
     libnss3 \
     libatk1.0-0 \
