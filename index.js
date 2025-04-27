@@ -14,11 +14,8 @@ const path     = require('path');
 const SESSION_DIR = process.env.SESSION_PATH || '.';
 
 const client = new Client({
-  puppeteer: {
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  },
-  authStrategy: new LocalAuth({ dataPath: SESSION_DIR })
+  puppeteer: { headless:true, args:['--no-sandbox','--disable-setuid-sandbox'] },
+  authStrategy: new LocalAuth({ dataPath: process.env.SESSION_PATH || '/data' })
 });
 
 /* ------------------------------------
