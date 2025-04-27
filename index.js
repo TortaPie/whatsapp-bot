@@ -1,202 +1,197 @@
+/* ------------------------------------
+   DEPENDÊNCIAS
+------------------------------------ */
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
-const ffmpeg = require('fluent-ffmpeg');
-const sharp  = require('sharp');
-const fs     = require('fs');
-const path   = require('path');
+const qrcode   = require('qrcode-terminal');
+const ffmpeg   = require('fluent-ffmpeg');
+const sharp    = require('sharp');
+const fs       = require('fs');
+const path     = require('path');
 
-const client = new Client({ authStrategy: new LocalAuth() });
+/* ------------------------------------
+   CLIENTE WHATSAPP
+------------------------------------ */
+const SESSION_DIR = process.env.SESSION_PATH || '.';
 
+const client = new Client({
+  puppeteer: {
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  },
+  authStrategy: new LocalAuth({ dataPath: SESSION_DIR })
+});
+
+/* ------------------------------------
+   EVENTOS DE CONEXÃO
+------------------------------------ */
 client.on('qr', qr => {
   qrcode.generate(qr, { small: true });
-  console.log('📲 Escaneie o QR no WhatsApp Mobile');
+  console.log('📲  Escaneie o QR acima para logar');
 });
 
 client.on('ready', () => {
-  console.log('✅ Bot pronto e conectado!');
+  console.log('✅  Bot conectado e pronto!');
 });
 
-client.on('message', async msg => {
-  const cmd = (msg.body||'').trim().toLowerCase();
-  if (cmd !== '!sticker' && cmd !== '!figurinha') return;
-
-  // 1) Captura mídia na própria mensagem ou em reply
-  let source = msg;
-  if (!msg.hasMedia && msg.hasQuotedMsg) {
-    const quoted = await msg.getQuotedMessage();
-    if (quoted.hasMedia) {
-      source = quoted;
-      console.log('📌 Comando em reply — usando mídia da mensagem citada');
-    }
-  }
-
-  // 2) Recusa “view once”
-  if (msg.isViewOnce) {
-    return msg.reply(
-      '⚠️ Vídeos “Visualizar uma vez” não podem ser processados.\n' +
-      'Reenvie como Documento (.mp4) ou envie uma imagem normal.'
-    );
-  }
-
-  // 3) Sem mídia → instruções
-  if (!source.hasMedia) {
-    console.log('⚠️ Sem mídia anexada');
-    return msg.reply(
-      '❌ Para gerar uma figurinha, envie uma imagem ou vídeo junto da legenda `!sticker`,\n' +
-      'ou responda à mídia com `!sticker`.'
-    );
-  }
-
-  // 4) Baixa mídia
-  console.log('⬇️ Baixando mídia...');
-  let media;
+/* ------------------------------------
+   FUNÇÃO AUXILIAR – DOWNLOAD SEGURO
+------------------------------------ */
+async function safeDownload(msg) {
   try {
-    media = await source.downloadMedia();
+    return await msg.downloadMedia();
   } catch (e) {
-    console.error('❌ downloadMedia falhou:', e);
-    return msg.reply('❌ Não foi possível baixar a mídia. Reenvie como documento (.mp4) ou imagem.');
+    console.error('❌  Falha no download:', e);
+    return null;
   }
+}
+
+/* ------------------------------------
+   TRATAMENTO DE MENSAGENS
+------------------------------------ */
+client.on('message', async (msg) => {
+
+  const trigger = (msg.body || '').trim().toLowerCase();
+  if (trigger !== '!sticker' && trigger !== '!figurinha') return;
+
+  // 1) Descobrir onde está a mídia (na própria ou em reply)
+  let src = msg;
+  if (!msg.hasMedia && msg.hasQuotedMsg) {
+    const q = await msg.getQuotedMessage();
+    if (q.hasMedia) src = q;
+  }
+
+  // 2) Checagem rápida
+  if (!src.hasMedia) {
+    return msg.reply('❌ Envie uma imagem ou vídeo com a legenda *!sticker*,\n'
+                   + 'ou responda a uma mídia com *!sticker*.');
+  }
+  if (src.isViewOnce) {
+    return msg.reply('⚠️ Vídeos “Visualizar uma vez” não são suportados.\n'
+                   + 'Reenvie como documento (.mp4) ou vídeo normal.');
+  }
+
+  // 3) Baixar mídia
+  console.log('⬇️  Baixando mídia...');
+  const media = await safeDownload(src);
   if (!media || !media.data) {
-    console.log('❌ Mídia inválida ou vazia');
-    return msg.reply('❌ Mídia indisponível. Vídeos .mov (gravação direto da camera) serão suportados menores ou igual a 5s, caso precise de mais tempo, envie o video como documento .mp4 com duração máxima de 9s. Vídeos .mp4 so podem ser processados até 9s. GIFs são suportados normalmente.');
+    return msg.reply('❌ Mídia indisponível. Tente reenviar como documento.');
   }
-
-  const mime     = media.mimetype.toLowerCase();
-  const filename = (source.filename||'').toLowerCase();
   const buffer   = Buffer.from(media.data, 'base64');
-  console.log('✅ Mídia baixada:', mime, filename);
+  const mime     = media.mimetype.toLowerCase();
+  const filename = (src.filename || '').toLowerCase();
+  console.log('✅  Mídia:', mime, filename || '');
 
-  // ——— Figurinha estática ———
+  /* ---------- FIGURINHA ESTÁTICA ---------- */
   if (mime.startsWith('image/')) {
-    console.log('🔄 Gerando figurinha estática 512×512 (cover)...');
     try {
       const webpBuf = await sharp(buffer)
         .resize(512, 512, { fit: 'cover' })
         .webp({ quality: 90 })
         .toBuffer();
 
-      console.log('📤 Enviando figurinha estática...');
       await msg.reply(
         new MessageMedia('image/webp', webpBuf.toString('base64')),
         undefined,
         { sendMediaAsSticker: true }
       );
-      console.log('🎉 Figurinha estática enviada!');
+      console.log('🎉  Sticker estático enviado!');
     } catch (e) {
-      console.error('❌ Erro figurinha estática:', e);
-      await msg.reply('❌ Falha ao gerar figurinha estática.');
+      console.error('❌  Erro sticker estático:', e);
+      msg.reply('❌ Falha ao gerar figurinha estática.');
     }
     return;
   }
 
-  // ——— Figurinha animada ———
-  const isQuickTime = mime === 'video/quicktime' || filename.endsWith('.mov');
-  const isMp4       = mime === 'video/mp4' || filename.endsWith('.mp4');
+  /* ---------- FIGURINHA ANIMADA ---------- */
+  const isMov = mime === 'video/quicktime' || filename.endsWith('.mov');
+  const isMp4 = mime === 'video/mp4' || filename.endsWith('.mp4') || mime === 'video/gif';
 
-  if (isQuickTime || isMp4) {
-    // Salva temp input
-    const tmpIn    = path.join(__dirname, 'tmp_in.mp4');
-    const tmpTrans = path.join(__dirname, 'tmp_trans.mp4');
-    const tmpOut   = path.join(__dirname, 'tmp_out.webp');
-    fs.writeFileSync(tmpIn, buffer);
-
-    // 5) Usa ffprobe pra duração
-    let duration = 0;
-    try {
-      const info = await new Promise((res, rej) =>
-        ffmpeg.ffprobe(tmpIn, (err, data) => err ? rej(err) : res(data))
-      );
-      duration = info.format.duration;
-      console.log('⏱ Duração do vídeo:', duration.toFixed(2), 's');
-    } catch (e) {
-      console.warn('⚠️ ffprobe falhou, assumindo duração sup ≤10s');
-    }
-
-    // 6) Se QuickTime (>5s) não disponível no web
-    if (isQuickTime && duration > 5) {
-      fs.unlinkSync(tmpIn);
-      console.log('❌ QuickTime >5s — instruir envio como doc MP4');
-      return msg.reply(
-        '⚠️ Vídeos .mov capturados pela câmera acima de 5 s não podem ser baixados.\n' +
-        'Por favor, reenvie como **Documento (.mp4)** menores que 10s de duração.'
-      );
-    }
-
-    // 7) Se MP4 >10s, pede vídeo menor
-    if (duration > 10) {
-      fs.unlinkSync(tmpIn);
-      console.log('❌ Vídeo >10s — instruir duração máxima');
-      return msg.reply(
-        '⚠️ Vídeos só podem ser menores que 10s para stickers animados.\n' +
-        'Por favor, envie um trecho menor que **10 segundos**.'
-      );
-    }
-
-    try {
-      // 8) Pré-transcode para H.264 Baseline (aceita vídeos da câmera)
-      console.log('🔄 Transcodificando para H.264 Baseline...');
-      await new Promise((res, rej) => {
-        ffmpeg(tmpIn)
-          .outputOptions([
-            '-c:v','libx264',
-            '-preset','ultrafast',
-            '-profile:v','baseline',
-            '-level','3.0',
-            '-pix_fmt','yuv420p',
-            '-movflags','+faststart',
-            '-an'
-          ])
-          .on('error', rej)
-          .on('end', res)
-          .save(tmpTrans);
-      });
-
-      // 9) Converter para WebP animado (trunca em 10s se precisar)
-      console.log('🔄 Convertendo para WebP animado...');
-      await new Promise((res, rej) => {
-        ffmpeg(tmpTrans)
-          .inputOptions(['-t','10'])
-          .videoCodec('libwebp')
-          .outputOptions([
-            '-vf',
-              'fps=10,scale=512:512:flags=lanczos,format=rgba,' +
-              'pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000',
-            '-lossless','0',
-            '-compression_level','6',
-            '-q:v','50',
-            '-loop','0'
-          ])
-          .on('error', rej)
-          .on('end', res)
-          .save(tmpOut);
-      });
-
-      // 10) Envia sticker animado
-      console.log('📤 Enviando figurinha animada...');
-      const webpBuf = fs.readFileSync(tmpOut);
-      await msg.reply(
-        new MessageMedia('image/webp', webpBuf.toString('base64')),
-        undefined,
-        { sendMediaAsSticker: true }
-      );
-      console.log('🎉 Figurinha animada enviada!');
-
-    } catch (e) {
-      console.error('❌ Erro processando vídeo:', e);
-      await msg.reply(
-        '❌ Não foi possível gerar o sticker animado.\n' +
-        'Certifique-se de enviar um .mp4 válido menor que 10segundos como Documento.'
-      );
-    } finally {
-      [tmpIn, tmpTrans, tmpOut].forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
-      console.log('🧹 Temporários removidos');
-    }
-    return;
+  if (!isMov && !isMp4) {
+    return msg.reply('❌ Formato não suportado. Use imagem ou vídeo .mp4/.mov.');
   }
 
-  // ——— Tipo não suportado ———
-  console.log('❌ Tipo de mídia não suportado:', mime);
-  await msg.reply('❌ Tipo não suportado. Envie uma imagem ou vídeo (.mp4).');
+  // salvar vídeo temporário
+  const tmpIn    = path.join(__dirname, 'tmp_in');
+  const tmpTrans = path.join(__dirname, 'tmp_trans.mp4');
+  const tmpOut   = path.join(__dirname, 'tmp_out.webp');
+  fs.writeFileSync(tmpIn, buffer);
+
+  // Detectar duração
+  let duration = 0;
+  try {
+    const info = await new Promise((res, rej) =>
+      ffmpeg.ffprobe(tmpIn, (err, data) => err ? rej(err) : res(data))
+    );
+    duration = info.format.duration || 0;
+  } catch (e) {
+    console.warn('⚠️  ffprobe falhou, assumindo duração curta');
+  }
+
+  // Regras de duração
+  if (isMov && duration > 5) {
+    fs.unlinkSync(tmpIn);
+    return msg.reply('⚠️ Vídeos .mov gravados pela câmera só funcionam até 5 s.\n'
+                   + 'Envie como Documento (.mp4) se quiser até 10 s.');
+  }
+  if (duration > 10) {
+    fs.unlinkSync(tmpIn);
+    return msg.reply('⚠️ O WhatsApp limita stickes animados a 10 s.\n'
+                   + 'Envie um trecho menor.');
+  }
+
+  try {
+    // 1) Transcode (caso precise) para H.264 baseline
+    await new Promise((ok, err) => {
+      ffmpeg(tmpIn)
+        .outputOptions([
+          '-c:v','libx264',
+          '-preset','ultrafast',
+          '-profile:v','baseline',
+          '-level','3.0',
+          '-pix_fmt','yuv420p',
+          '-movflags','+faststart',
+          '-an'
+        ])
+        .on('end', ok)
+        .on('error', err)
+        .save(tmpTrans);
+    });
+
+    // 2) Converter para WebP animado em 512×512
+    await new Promise((ok, err) => {
+      ffmpeg(tmpTrans)
+        .inputOptions(['-t','10'])
+        .videoCodec('libwebp')
+        .outputOptions([
+          '-vf','fps=10,scale=512:512:flags=lanczos,' +
+                'format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000',
+          '-lossless','0',
+          '-compression_level','6',
+          '-q:v','50',
+          '-loop','0',
+          '-an'
+        ])
+        .on('end', ok)
+        .on('error', err)
+        .save(tmpOut);
+    });
+
+    const webpBuf = fs.readFileSync(tmpOut);
+    await msg.reply(
+      new MessageMedia('image/webp', webpBuf.toString('base64')),
+      undefined,
+      { sendMediaAsSticker: true }
+    );
+    console.log('🎉  Sticker animado enviado!');
+
+  } catch (e) {
+    console.error('❌  Falha no processamento do vídeo:', e);
+    msg.reply('❌ Não foi possível gerar o sticker animado.\n'
+            + 'Tente outro vídeo .mp4 de até 10 s ou envie como documento.');
+  } finally {
+    [tmpIn, tmpTrans, tmpOut].forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
+  }
 });
 
+/* ------------------------------------ */
 client.initialize();
