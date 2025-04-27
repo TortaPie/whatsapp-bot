@@ -1,12 +1,6 @@
-node_modules/
-.wwebjs_auth/
-.wwebjs_cache/
-npm-debug.log*
-
-# ---------- Base ----------
 FROM node:18-bullseye
 
-# ---------- Dependências para Chromium + FFmpeg ----------
+# libs necessárias ao Chromium + ffmpeg
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     ca-certificates fonts-liberation libappindicator3-1 libasound2 \
@@ -15,13 +9,10 @@ RUN apt-get update && apt-get install -y \
     libxdamage1 libxrandr2 libxkbcommon0 xdg-utils --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
-# ---------- App ----------
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --production
 COPY . .
 
-# volume onde ficará a sessão
 ENV SESSION_PATH=/data
-
 CMD ["node","index.js"]
