@@ -160,7 +160,7 @@ client.on('message', async msg => {
     if (isMp4 && !filename) {
       fs.unlinkSync(tmpIn);
       return safeReply(msg,
-        '❌ Para stickers animados, envie o vídeo como Documento (.mp4).'
+        '❌ Para stickers animados, envie o vídeo como Documento (.mp4).'   
       );
     }
     let duration = 0;
@@ -211,3 +211,20 @@ client.on('message', async msg => {
       return safeReply(
         msg,
         new MessageMedia('image/webp', webpBuf.toString('base64')),
+        undefined,
+        { sendMediaAsSticker: true }
+      );
+    } catch (e) {
+      console.error('❌ Erro figurinha animada:', e);
+      return safeReply(msg, '❌ Não foi possível gerar sticker animado.');
+    } finally {
+      [tmpIn, tmpTrans, tmpOut].forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
+      console.log('🧹 Temporários removidos');
+    }
+  }
+
+  console.log('❌ Tipo de mídia não suportado:', mime);
+  return safeReply(msg, '❌ Tipo de mídia não suportado.');
+});
+
+client.initialize();
