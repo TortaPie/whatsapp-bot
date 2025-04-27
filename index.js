@@ -11,12 +11,18 @@ const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
 
-// helper para respostas seguras
+// helper para respostas seguras com reconexão automática
 async function safeReply(msg, ...args) {
   try {
     return await msg.reply(...args);
   } catch (err) {
-    console.error('🚨 falha ao enviar reply:', err);
+    console.error('🚨 falha ao enviar reply:', err.message);
+    // detecta sessão fechada e reinicializa client
+    if (err.message.includes('Sessão encerrada')) {
+      console.log('♻️ Sessão encerrada detectada, reinicializando client...');
+      try { await client.destroy(); } catch {};
+      client.initialize();
+    }
   }
 }
 
@@ -205,20 +211,3 @@ client.on('message', async msg => {
       return safeReply(
         msg,
         new MessageMedia('image/webp', webpBuf.toString('base64')),
-        undefined,
-        { sendMediaAsSticker: true }
-      );
-    } catch (e) {
-      console.error('❌ Erro figurinha animada:', e);
-      return safeReply(msg, '❌ Não foi possível gerar sticker animado.');
-    } finally {
-      [tmpIn, tmpTrans, tmpOut].forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
-      console.log('🧹 Temporários removidos');
-    }
-  }
-
-  console.log('❌ Tipo de mídia não suportado:', mime);
-  return safeReply(msg, '❌ Tipo de mídia não suportado.');
-});
-
-client.initialize();
