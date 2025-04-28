@@ -83,12 +83,24 @@ const client = new Client({
   }
 });
 
+// Tentando reconectar automaticamente em caso de desconexão
 client.on('qr', qr => {
   currentQr = qr;
   qrcode.generate(qr, { small: true });
   console.log('QR code gerado');
 });
+
 client.on('ready', () => console.log('Bot conectado!'));
+
+client.on('disconnected', (reason) => {
+  console.log(`Conexão perdida: ${reason}. Tentando reconectar...`);
+  
+  // Tentar reconectar automaticamente após a desconexão
+  setTimeout(() => {
+    console.log('Tentando reconectar...');
+    client.initialize();  // Tentando reiniciar a conexão sem a necessidade de novo QR code.
+  }, 5000);  // Espera 5 segundos antes de tentar reconectar
+});
 
 client.on('message', async msg => {
   const text = (msg.body || '').trim().toLowerCase();
