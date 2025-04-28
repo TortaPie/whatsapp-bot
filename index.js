@@ -9,21 +9,22 @@ const sharp = require('sharp');
 
 const app = express();
 const port = process.env.PORT || 3000;
-let currentQr;
+let currentQr = null;
 
-// servidor Express para exibir o QR
-app.get('/', (_, res) =>
-  res.send(
-    currentQr
-      ? `<h1>WhatsApp Web QR Code</h1><img src="/qr.png"/><p>Escaneie com seu WhatsApp Mobile</p>`
-      : 'QR code ainda não gerado. Aguarde.'
-  )
-);
-app.get('/qr.png', (_, res) =>
-  currentQr
-    ? (res.type('png'), QRCode.toFileStream(res, currentQr))
-    : res.status(404).send('QR não disponível')
-);
+// Express server para exibir o QR code
+app.get('/', (_, res) => {
+  if (!currentQr) return res.send('QR code ainda não gerado. Aguarde.');
+  res.send(`
+    <h1>WhatsApp Web QR Code</h1>
+    <img src="/qr.png" alt="QR Code" />
+    <p>Escaneie com seu WhatsApp Mobile</p>
+  `);
+});
+app.get('/qr.png', (_, res) => {
+  if (!currentQr) return res.status(404).send('QR não disponível');
+  res.type('png');
+  QRCode.toFileStream(res, currentQr);
+});
 app.listen(port, '0.0.0.0', () => console.log(`Servidor HTTP na porta ${port}`));
 
 const client = new Client({
@@ -52,9 +53,14 @@ client.on('disconnected', reason => {
   setTimeout(() => client.initialize(), 5000);
 });
 
-// processadores de mídia
+// Processadores de mídia
 const processors = {
-  image: buf => sharp(buf).resize(512, 512, { fit: 'cover' }).webp({ quality: 90 }).toBuffer(),
+  image: buf =>
+    sharp(buf)
+      .resize(512, 512, { fit: 'cover' })
+      .webp({ quality: 90 })
+      .toBuffer(),
+
   gif: (inPath, outPath) =>
     new Promise((res, rej) =>
       ffmpeg(inPath)
@@ -73,8 +79,8 @@ const processors = {
         .on('error', rej)
         .save(outPath)
     ),
+
   video: async (inPath, transPath, outPath) => {
-    // primeira etapa: transcode para mp4 baseline
     await new Promise((res, rej) =>
       ffmpeg(inPath)
         .outputOptions([
@@ -90,7 +96,6 @@ const processors = {
         .on('error', rej)
         .save(transPath)
     );
-    // segunda etapa: converter mp4 para webp animado
     return new Promise((res, rej) =>
       ffmpeg(transPath)
         .inputOptions(['-t', '10'])
@@ -112,6 +117,7 @@ const processors = {
 client.on('message', async msg => {
   const text = (msg.body || '').trim().toLowerCase();
 
+  // TESTE DE CONEXÃO
   if (text === '!ping') {
     return msg.reply('Pong!');
   }
@@ -126,7 +132,12 @@ client.on('message', async msg => {
   }
   if (text !== '!sticker' && text !== '!figurinha') return;
 
-  // identifica a mídia, seja direta ou em reply
+  // Se for sticker pronto
+  if (msg.type === 'sticker') {
+    return msg.reply('❌️ Enviei um sticker pronto? Use GIF ou vídeo como documento.');
+  }
+
+  // obtém mídia, seja direta ou em reply
   let source = msg;
   if (!msg.hasMedia && msg.hasQuotedMsg) {
     const q = await msg.getQuotedMessage();
@@ -149,18 +160,21 @@ client.on('message', async msg => {
   const mime = media.mimetype;
   const buf = Buffer.from(media.data, 'base64');
   const filename = (source.filename || '').toLowerCase();
-  const ext = mime.includes('gif') || filename.endsWith('.gif')
+  const isGif = mime.includes('gif') || filename.endsWith('.gif');
+  const isVideo = mime.startsWith('video/');
+  const ext = isGif
     ? 'gif'
-    : mime.startsWith('video/')
-      ? (filename.endsWith('.mov') ? 'mov' : 'mp4')
-      : '';
-  const inPath = path.join(__dirname, `in.${ext}`);
+    : isVideo
+      ? filename.endsWith('.mov') ? 'mov' : 'mp4'
+      : null;
+
+  const inPath = ext ? path.join(__dirname, `in.${ext}`) : null;
   const transPath = path.join(__dirname, 'trans.mp4');
   const outPath = path.join(__dirname, 'out.webp');
 
   try {
     // imagem estática
-    if (mime.startsWith('image/') && !mime.includes('gif')) {
+    if (mime.startsWith('image/') && !isGif) {
       const result = await processors.image(buf);
       return msg.reply(
         new MessageMedia('image/webp', result.toString('base64')),
@@ -169,23 +183,20 @@ client.on('message', async msg => {
       );
     }
 
-    // grava entrada em arquivo
+    // grava o buffer no disco
+    if (!inPath) throw new Error('unsupported');
     await fs.writeFile(inPath, buf);
 
-    if (ext === 'gif') {
+    if (isGif) {
       await processors.gif(inPath, outPath);
-    } else if (ext === 'mp4' || ext === 'mov') {
-      // chama ffprobe corretamente via Promise
+    } else {
+      // vídeo
       const probe = await new Promise((res, rej) =>
         ffmpeg.ffprobe(inPath, (err, data) => (err ? rej(err) : res(data)))
       ).catch(() => ({ format: { duration: 10 } }));
 
-      if (probe.format.duration > 10) {
-        throw new Error('duration');
-      }
+      if (probe.format.duration > 10) throw new Error('duration');
       await processors.video(inPath, transPath, outPath);
-    } else {
-      throw new Error('unsupported');
     }
 
     const wp = await fs.readFile(outPath);
@@ -194,7 +205,6 @@ client.on('message', async msg => {
       undefined,
       { sendMediaAsSticker: true }
     );
-
   } catch (err) {
     if (err.message === 'duration') {
       return msg.reply('⚠️️ Vídeo maior que 10s não suportado.');
@@ -204,8 +214,7 @@ client.on('message', async msg => {
     }
     return msg.reply('❌️ Erro ao processar mídia.');
   } finally {
-    // limpa arquivos temporários
-    [inPath, transPath, outPath].forEach(f => fs.unlink(f).catch(() => {}));
+    [inPath, transPath, outPath].forEach(f => f && fs.unlink(f).catch(() => {}));
   }
 });
 
