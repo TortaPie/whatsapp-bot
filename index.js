@@ -74,6 +74,7 @@ const processors = {
         .save(outPath)
     ),
   video: async (inPath, transPath, outPath) => {
+    // primeira etapa: transcode para mp4 baseline
     await new Promise((res, rej) =>
       ffmpeg(inPath)
         .outputOptions([
@@ -89,6 +90,7 @@ const processors = {
         .on('error', rej)
         .save(transPath)
     );
+    // segunda etapa: converter mp4 para webp animado
     return new Promise((res, rej) =>
       ffmpeg(transPath)
         .inputOptions(['-t', '10'])
@@ -110,7 +112,6 @@ const processors = {
 client.on('message', async msg => {
   const text = (msg.body || '').trim().toLowerCase();
 
-  // novo comando !ping
   if (text === '!ping') {
     return msg.reply('Pong!');
   }
@@ -125,12 +126,15 @@ client.on('message', async msg => {
   }
   if (text !== '!sticker' && text !== '!figurinha') return;
 
+  // identifica a mídia, seja direta ou em reply
   let source = msg;
   if (!msg.hasMedia && msg.hasQuotedMsg) {
     const q = await msg.getQuotedMessage();
     if (q.hasMedia) source = q;
   }
-  if (!source.hasMedia) return msg.reply('❌️ Envie uma mídia junto com !sticker.');
+  if (!source.hasMedia) {
+    return msg.reply('❌️ Envie uma mídia junto com !sticker.');
+  }
 
   let media;
   try {
@@ -138,7 +142,9 @@ client.on('message', async msg => {
   } catch {
     return msg.reply('❌️ Falha ao baixar mídia.');
   }
-  if (!media?.data) return msg.reply('⚠️️ Mídia indisponível. Use documento.');
+  if (!media?.data) {
+    return msg.reply('⚠️️ Mídia indisponível. Use documento.');
+  }
 
   const mime = media.mimetype;
   const buf = Buffer.from(media.data, 'base64');
@@ -153,6 +159,7 @@ client.on('message', async msg => {
   const outPath = path.join(__dirname, 'out.webp');
 
   try {
+    // imagem estática
     if (mime.startsWith('image/') && !mime.includes('gif')) {
       const result = await processors.image(buf);
       return msg.reply(
@@ -162,13 +169,20 @@ client.on('message', async msg => {
       );
     }
 
+    // grava entrada em arquivo
     await fs.writeFile(inPath, buf);
 
     if (ext === 'gif') {
       await processors.gif(inPath, outPath);
     } else if (ext === 'mp4' || ext === 'mov') {
-      const { format: info } = await ffmpeg.ffprobe(inPath).catch(() => ({ format: { duration: 10 } }));
-      if (info.duration > 10) throw new Error('duration');
+      // chama ffprobe corretamente via Promise
+      const probe = await new Promise((res, rej) =>
+        ffmpeg.ffprobe(inPath, (err, data) => (err ? rej(err) : res(data)))
+      ).catch(() => ({ format: { duration: 10 } }));
+
+      if (probe.format.duration > 10) {
+        throw new Error('duration');
+      }
       await processors.video(inPath, transPath, outPath);
     } else {
       throw new Error('unsupported');
@@ -180,11 +194,17 @@ client.on('message', async msg => {
       undefined,
       { sendMediaAsSticker: true }
     );
+
   } catch (err) {
-    if (err.message === 'duration') return msg.reply('⚠️️ Vídeo maior que 10s não suportado.');
-    if (err.message === 'unsupported') return msg.reply('❌️ Tipo não suportado.');
+    if (err.message === 'duration') {
+      return msg.reply('⚠️️ Vídeo maior que 10s não suportado.');
+    }
+    if (err.message === 'unsupported') {
+      return msg.reply('❌️ Tipo não suportado.');
+    }
     return msg.reply('❌️ Erro ao processar mídia.');
   } finally {
+    // limpa arquivos temporários
     [inPath, transPath, outPath].forEach(f => fs.unlink(f).catch(() => {}));
   }
 });
