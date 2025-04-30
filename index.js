@@ -6,44 +6,40 @@ const path = require('path');
 const sharp = require('sharp');
 const ffmpeg = require('fluent-ffmpeg');
 
-// Configura servidor web para exibir QR code
+// --- Servidor Web para QR Code ---
 const app = express();
 const PORT = process.env.PORT || 3000;
 let qrImageBase64 = null;
-
 app.get('/', (req, res) => {
-  if (!qrImageBase64) {
-    return res.send('<h2>QR code ainda não gerado. Por favor, aguarde...</h2>');
-  }
+  if (!qrImageBase64) return res.send('<h2>QR code não gerado ainda. Aguarde...</h2>');
   res.send(`
-    <html>
-      <head><title>PieBot QR Code</title></head>
-      <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;">
-        <h1>Escaneie este QR com seu WhatsApp</h1>
-        <img src="data:image/png;base64,${qrImageBase64}" alt="QR Code" />
-        <p>Depois disso, volte ao seu WhatsApp para usar o bot.</p>
-      </body>
-    </html>
+    <html><head><title>PieBot QR</title></head><body style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;">
+      <h1>Escaneie com seu WhatsApp</h1>
+      <img src="data:image/png;base64,${qrImageBase64}" />
+    </body></html>
   `);
 });
+app.listen(PORT, () => console.log(`HTTP server em http://localhost:${PORT}`));
 
-app.listen(PORT, () => console.log(`Servidor HTTP rodando em http://localhost:${PORT}`));
-
-// Inicializa cliente WhatsApp Web
+// --- Configuração do cliente WhatsApp Web ---
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
-  puppeteer: {
-    headless: true,
-    args: ['--no-sandbox','--disable-setuid-sandbox']
-  }
+  puppeteer: { headless: true, args: ['--no-sandbox','--disable-setuid-sandbox'] }
 });
 
-// Gera QR code e atualiza página
+// Reconectar em caso de desconexão
+client.on('disconnected', reason => {
+  console.log('Desconectado:', reason, '. Tentando reconectar...');
+  client.initialize();
+});
+client.on('auth_failure', msg => console.error('Falha de autenticação', msg));
+
+// Geração do QR code
 client.on('qr', async qr => {
   try {
     const url = await QRCode.toDataURL(qr);
     qrImageBase64 = url.split(',')[1];
-    console.log('QR code gerado e disponível em /');
+    console.log('QR code gerado. Acesse / no navegador.');
   } catch (err) {
     console.error('Erro ao gerar QR code:', err);
   }
@@ -51,82 +47,71 @@ client.on('qr', async qr => {
 
 client.on('ready', () => console.log('Cliente WhatsApp Web pronto!'));
 
-// Armazena chats já saudados
+// --- Lógica de Mensagens ---
 const greetedChats = new Set();
-
-// Limites e parâmetros
-const MAX_STATIC_SIZE = 1024 * 1024; // 1MB
-const MAX_DURATION = 10; // 10 segundos para animados
+const MAX_STATIC = 1024 * 1024;  // 1MB
+const MAX_DUR = 10;              // segundos animado
 
 client.on('message', async msg => {
-  if (msg.fromMe) return;
+  try {
+    if (msg.fromMe) return;
+    const text = (msg.body || '').trim().toLowerCase();
 
-  // Saudação inicial
-  if (!greetedChats.has(msg.from)) {
-    greetedChats.add(msg.from);
-    await msg.reply(
-      'Olá! Sou o PieBot 🤖\n' +
-      'Use *!s* para stickers estáticos (imagem)\n' +
-      'Use *!sa* para stickers animados (GIF/vídeo como DOCUMENTO)\n' +
-      'Digite *!help* para mais detalhes.'
-    );
-  }
+    // Conexão
+    if (text === '!ping') return msg.reply('Pong!');
 
-  const text = msg.body?.trim().toLowerCase();
-
-  // Ajuda
-  if (text === '!help') {
-    return msg.reply(
-      '*!s* → Sticker estático: envie/responda imagem com !s\n' +
-      '*!sa* → Sticker animado: envie GIF/vídeo como DOCUMENTO com !sa'
-    );
-  }
-
-  // Sticker estático
-  if (text === '!s') {
-    let src = msg;
-    if (!msg.hasMedia && msg.hasQuotedMsg) src = await msg.getQuotedMessage();
-    if (!src.hasMedia) {
-      return msg.reply('Envie/responda uma imagem com !s para criar um sticker estático.');
+    // Saudação inicial
+    if (!greetedChats.has(msg.from)) {
+      greetedChats.add(msg.from);
+      await msg.reply(
+        'Olá! Sou o PieBot 🤖\n' +
+        '*!ping* para teste de conexão\n' +
+        '*!s*    → Sticker estático (imagem)\n' +
+        '*!sa*   → Sticker animado (GIF/vídeo como DOCUMENTO)'
+      );
     }
-    try {
+
+    // Ajuda
+    if (text === '!help') {
+      return msg.reply(
+        '*!ping* → Testa conexão\n' +
+        '*!s* → Sticker estático: envie ou responda uma imagem com !s\n' +
+        '*!sa* → Sticker animado: envie ou responda um GIF/vídeo como DOCUMENTO com !sa'
+      );
+    }
+
+    // Sticker estático
+    if (text === '!s') {
+      let src = msg;
+      if (!msg.hasMedia && msg.hasQuotedMsg) src = await msg.getQuotedMessage();
+      if (!src.hasMedia) return msg.reply('Envie ou responda uma imagem com !s.');
       const media = await src.downloadMedia();
+      if (!media?.data) return msg.reply('Falha ao baixar mídia.');
       const buf = Buffer.from(media.data, 'base64');
-      let webp = await sharp(buf)
-        .resize(512,512, { fit: 'cover' })
-        .webp({ quality: 80 })
-        .toBuffer();
-      if (webp.length > MAX_STATIC_SIZE) {
-        webp = await sharp(buf)
-          .resize(256,256, { fit: 'cover' })
-          .webp({ quality: 50 })
-          .toBuffer();
+      let webp = await sharp(buf).resize(512,512,{fit:'cover'}).webp({quality:80}).toBuffer();
+      if (webp.length > MAX_STATIC) {
+        webp = await sharp(buf).resize(256,256,{fit:'cover'}).webp({quality:50}).toBuffer();
       }
       const sticker = new MessageMedia('image/webp', webp.toString('base64'));
-      await msg.reply(sticker, undefined, { sendMediaAsSticker: true });
-    } catch (err) {
-      console.error('Erro sticker estático:', err);
-      msg.reply('Erro ao criar sticker estático.');
+      return msg.reply(sticker, undefined, { sendMediaAsSticker: true });
     }
-    return;
-  }
 
-  // Sticker animado
-  if (text === '!sa') {
-    let src = msg;
-    if (!msg.hasMedia && msg.hasQuotedMsg) src = await msg.getQuotedMessage();
-    if (!src.hasMedia) {
-      return msg.reply('Envie/responda um GIF ou vídeo como DOCUMENTO com !sa para sticker animado.');
-    }
-    try {
+    // Sticker animado
+    if (text === '!sa') {
+      let src = msg;
+      if (!msg.hasMedia && msg.hasQuotedMsg) src = await msg.getQuotedMessage();
+      if (!src.hasMedia) return msg.reply('Envie ou responda um GIF/vídeo como DOCUMENTO com !sa.');
       const media = await src.downloadMedia();
+      if (!media?.data) return msg.reply('Falha ao baixar mídia.');
       const buf = Buffer.from(media.data, 'base64');
-      const inPath = path.join(__dirname, 'temp_in');
+      let ext = media.mimetype.split('/')[1].split('+')[0] || 'mp4';
+      if (ext === 'jpeg') ext = 'jpg';
+      const inPath = path.join(__dirname, `temp_in.${ext}`);
       const outPath = path.join(__dirname, 'temp_out.webp');
       await fs.writeFile(inPath, buf);
       await new Promise((resolve, reject) => {
         ffmpeg(inPath)
-          .inputOptions([`-t ${MAX_DURATION}`])
+          .inputOptions([`-t ${MAX_DUR}`])
           .outputOptions([
             '-vcodec libwebp',
             '-loop 0',
@@ -144,13 +129,12 @@ client.on('message', async msg => {
       const webpBuf = await fs.readFile(outPath);
       const sticker = new MessageMedia('image/webp', webpBuf.toString('base64'));
       await msg.reply(sticker, undefined, { sendMediaAsSticker: true });
-      await fs.unlink(inPath);
-      await fs.unlink(outPath);
-    } catch (err) {
-      console.error('Erro sticker animado:', err);
-      msg.reply('Erro ao criar sticker animado.');
+      await fs.unlink(inPath).catch(() => {});
+      await fs.unlink(outPath).catch(() => {});
+      return;
     }
-    return;
+  } catch (err) {
+    console.error('Erro no handler:', err);
   }
 });
 
