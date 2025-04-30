@@ -27,24 +27,38 @@ const client = new Client({
   puppeteer: { headless: true, args: ['--no-sandbox','--disable-setuid-sandbox'] }
 });
 
-// Reconectar em caso de desconexão
+// Eventos de reconexão e autenticação
+client.on('auth_failure', msg => {
+  console.error('Falha de autenticação:', msg);
+  // Limpar sessão e reinicializar
+  client.logout().then(() => client.initialize());
+});
 client.on('disconnected', reason => {
-  console.log('Desconectado:', reason, '. Tentando reconectar...');
+  console.warn('Desconectado:', reason, '. Reconectando...');
   client.initialize();
 });
-client.on('auth_failure', msg => console.error('Falha de autenticação', msg));
+client.on('changed_state', state => {
+  console.log('Estado do cliente mudou:', state);
+  if (state === 'CONFLICT') {
+    // Resolve conflitos de sessão
+    client.useProxy(false);
+    client.initialize();
+  }
+});
+client.on('remote_session_attempt', () => {
+  console.warn('Tentativa de sessão remota detectada. Reconectando...');
+  client.initialize();
+});
 
 // Geração do QR code
 client.on('qr', async qr => {
   try {
-    const url = await QRCode.toDataURL(qr);
-    qrImageBase64 = url.split(',')[1];
+    qrImageBase64 = (await QRCode.toDataURL(qr)).split(',')[1];
     console.log('QR code gerado. Acesse / no navegador.');
   } catch (err) {
     console.error('Erro ao gerar QR code:', err);
   }
 });
-
 client.on('ready', () => console.log('Cliente WhatsApp Web pronto!'));
 
 // --- Lógica de Mensagens ---
@@ -55,17 +69,18 @@ const MAX_DUR = 10;              // segundos animado
 client.on('message', async msg => {
   try {
     if (msg.fromMe) return;
-    const text = (msg.body || '').trim().toLowerCase();
+    const raw = (msg.body || '').trim();
+    const text = raw.toLowerCase();
 
-    // Conexão
+    // Teste de conexão
     if (text === '!ping') return msg.reply('Pong!');
 
     // Saudação inicial
     if (!greetedChats.has(msg.from)) {
       greetedChats.add(msg.from);
       await msg.reply(
-        'Olá! Sou o PieBot 🤖\n' +
-        '*!ping* para teste de conexão\n' +
+        'Olá! Eu sou o PieBot 🤖\n' +
+        '*!ping* → Testar conexão\n' +
         '*!s*    → Sticker estático (imagem)\n' +
         '*!sa*   → Sticker animado (GIF/vídeo como DOCUMENTO)'
       );
@@ -75,8 +90,8 @@ client.on('message', async msg => {
     if (text === '!help') {
       return msg.reply(
         '*!ping* → Testa conexão\n' +
-        '*!s* → Sticker estático: envie ou responda uma imagem com !s\n' +
-        '*!sa* → Sticker animado: envie ou responda um GIF/vídeo como DOCUMENTO com !sa'
+        '*!s* → Sticker estático: envie/responda imagem com !s\n' +
+        '*!sa* → Sticker animado: envie GIF/vídeo como DOCUMENTO com !sa'
       );
     }
 
@@ -84,7 +99,7 @@ client.on('message', async msg => {
     if (text === '!s') {
       let src = msg;
       if (!msg.hasMedia && msg.hasQuotedMsg) src = await msg.getQuotedMessage();
-      if (!src.hasMedia) return msg.reply('Envie ou responda uma imagem com !s.');
+      if (!src.hasMedia) return msg.reply('Envie/responda uma imagem com !s.');
       const media = await src.downloadMedia();
       if (!media?.data) return msg.reply('Falha ao baixar mídia.');
       const buf = Buffer.from(media.data, 'base64');
@@ -100,14 +115,14 @@ client.on('message', async msg => {
     if (text === '!sa') {
       let src = msg;
       if (!msg.hasMedia && msg.hasQuotedMsg) src = await msg.getQuotedMessage();
-      if (!src.hasMedia) return msg.reply('Envie ou responda um GIF/vídeo como DOCUMENTO com !sa.');
+      if (!src.hasMedia) return msg.reply('Envie/responda um GIF/vídeo como DOCUMENTO com !sa.');
       const media = await src.downloadMedia();
       if (!media?.data) return msg.reply('Falha ao baixar mídia.');
       const buf = Buffer.from(media.data, 'base64');
       let ext = media.mimetype.split('/')[1].split('+')[0] || 'mp4';
       if (ext === 'jpeg') ext = 'jpg';
-      const inPath = path.join(__dirname, `temp_in.${ext}`);
-      const outPath = path.join(__dirname, 'temp_out.webp');
+      const inPath = path.join(__dirname, `tmp_in.${ext}`);
+      const outPath = path.join(__dirname, 'tmp_out.webp');
       await fs.writeFile(inPath, buf);
       await new Promise((resolve, reject) => {
         ffmpeg(inPath)
