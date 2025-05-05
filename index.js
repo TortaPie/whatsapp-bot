@@ -9,19 +9,18 @@ const ffmpeg = require('fluent-ffmpeg');
 const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
-// Express para exibir QR
+// ─── Configuração do servidor HTTP para QR ─────────────────────────────────
 const app = express();
 const PORT = process.env.PORT || 3000;
 let qrImageBase64 = null;
 
 app.get('/', (req, res) => {
   if (qrImageBase64) {
-    res.send(`
-      <!DOCTYPE html>
-      <html><body style="display:flex;align-items:center;justify-content:center;height:100vh;">
+    res.send(`<!DOCTYPE html><html>
+      <body style="display:flex;align-items:center;justify-content:center;height:100vh;">
         <img src="data:image/png;base64,${qrImageBase64}" />
-      </body></html>
-    `);
+      </body>
+    </html>`);
   } else {
     res.send('<h2>QR code indisponível</h2>');
   }
@@ -31,7 +30,7 @@ app.listen(PORT, '0.0.0.0', () =>
   console.log(`QR server running at http://0.0.0.0:${PORT}`)
 );
 
-// Puppeteer args para reduzir memória
+// ─── Puppeteer opções de baixo consumo de memória ─────────────────────────
 const puppeteerOptions = {
   headless: true,
   args: [
@@ -43,11 +42,12 @@ const puppeteerOptions = {
   ]
 };
 
-// Flags de estado
+// ─── Flags de estado e fila de envios ─────────────────────────────────────
 let isReady = false;
 const pendingSends = [];
+let keepAliveInterval = null;
 
-// Inicializa client WhatsApp
+// ─── Inicialização do client WhatsApp ────────────────────────────────────
 const client = new Client({
   authStrategy: new LocalAuth({
     dataPath: process.env.SESSION_PATH || './.wwebjs_auth'
@@ -55,10 +55,10 @@ const client = new Client({
   puppeteer: puppeteerOptions
 });
 
-// Safe send que respeita isReady e enfileira mensagens
+// Safe send respeitando isReady e enfileirando se necessário
 async function safeSend(to, content, opts = {}) {
   if (!isReady) {
-    console.warn('Client não está pronto, enfileirando mensagem.');
+    console.warn('Client não está pronto, enfileirando mensagem');
     pendingSends.push({ to, content, opts });
     return;
   }
@@ -69,16 +69,20 @@ async function safeSend(to, content, opts = {}) {
   }
 }
 
-// Helpers de reconexão
+// ─── Função de reinicialização robusta ─────────────────────────────────────
 async function restartClient() {
   isReady = false;
-  try { await client.destroy(); } catch(_) {}
+  if (keepAliveInterval) {
+    clearInterval(keepAliveInterval);
+    keepAliveInterval = null;
+  }
+  try { await client.destroy(); } catch (_) {}
   client.initialize();
 }
 
-// Eventos de conexão
+// ─── Handlers de eventos do client ────────────────────────────────────────
 client.on('qr', async qr => {
-  console.log('QR recebido, atualizando display.');
+  console.log('QR recebido, atualizando display');
   try {
     const dataUrl = await QRCode.toDataURL(qr);
     qrImageBase64 = dataUrl.split(',')[1];
@@ -88,22 +92,32 @@ client.on('qr', async qr => {
 });
 
 client.on('authenticated', () =>
-  console.log('Autenticado com sucesso.')
+  console.log('Autenticado com sucesso')
 );
 
 client.on('auth_failure', async () => {
-  console.warn('Auth failure, reiniciando client...');
+  console.warn('Auth failure, reiniciando client');
   await restartClient();
 });
 
 client.on('ready', () => {
-  console.log('Client está pronto.');
+  console.log('Client está pronto');
   isReady = true;
   qrImageBase64 = null;
-  // despacha toda fila de mensagens pendentes
+
+  // Despacha fila de mensagens pendentes
   pendingSends.splice(0).forEach(m =>
     safeSend(m.to, m.content, m.opts)
   );
+
+  // KEEP‑ALIVE: envia presença a cada 5 minutos
+  if (keepAliveInterval) clearInterval(keepAliveInterval);
+  keepAliveInterval = setInterval(() => {
+    if (isReady) {
+      console.log('Keep‑alive: enviando presença disponível');
+      client.sendPresenceAvailable();
+    }
+  }, 5 * 60 * 1000);
 });
 
 client.on('disconnected', async reason => {
@@ -119,7 +133,7 @@ process.on('uncaughtException', err =>
   console.error('Uncaught Exception:', err)
 );
 
-// Lógica do bot
+// ─── Lógica de processamento de mensagens ─────────────────────────────────
 const greeted = new Set();
 
 client.on('message', async msg => {
@@ -150,7 +164,7 @@ client.on('message', async msg => {
     );
   }
 
-  // Download e processamento de mídia
+  // Download da mídia
   let media;
   try {
     media = await target.downloadMedia();
