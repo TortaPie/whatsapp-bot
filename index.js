@@ -1,6 +1,7 @@
+﻿'use strict';
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const express = require('express');
-const QRCode = require('qrcode');
+const qrcode = require('qrcode-terminal');
+const { randomUUID } = require('crypto');
 const fs = require('fs').promises;
 const path = require('path');
 const os = require('os');
@@ -8,27 +9,6 @@ const sharp = require('sharp');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-
-// ─── Configuração do servidor HTTP para QR ─────────────────────────────────
-const app = express();
-const PORT = process.env.PORT || 3000;
-let qrImageBase64 = null;
-
-app.get('/', (req, res) => {
-  if (qrImageBase64) {
-    res.send(`<!DOCTYPE html><html>
-      <body style="display:flex;align-items:center;justify-content:center;height:100vh;">
-        <img src="data:image/png;base64,${qrImageBase64}" />
-      </body>
-    </html>`);
-  } else {
-    res.send('<h2>QR code indisponível</h2>');
-  }
-});
-
-app.listen(PORT, '0.0.0.0', () =>
-  console.log(`QR server running at http://0.0.0.0:${PORT}`)
-);
 
 // ─── Puppeteer opções de baixo consumo de memória ─────────────────────────
 const puppeteerOptions = {
@@ -81,11 +61,10 @@ async function restartClient() {
 }
 
 // ─── Handlers de eventos do client ────────────────────────────────────────
-client.on('qr', async qr => {
-  console.log('QR recebido, atualizando display');
+client.on('qr', qr => {
+  console.log('QR recebido, escaneie para autenticar');
   try {
-    const dataUrl = await QRCode.toDataURL(qr);
-    qrImageBase64 = dataUrl.split(',')[1];
+    qrcode.generate(qr, { small: true });
   } catch (e) {
     console.error('QR generation error:', e);
   }
@@ -103,7 +82,6 @@ client.on('auth_failure', async () => {
 client.on('ready', () => {
   console.log('Client está pronto');
   isReady = true;
-  qrImageBase64 = null;
 
   // Despacha fila de mensagens pendentes
   pendingSends.splice(0).forEach(m =>
@@ -175,9 +153,9 @@ client.on('message', async msg => {
 
   const buf = Buffer.from(media.data, 'base64');
   const tmpDir = os.tmpdir();
-  const ext = (media.mimetype || '').split('/')[1] || 'bin';
-  const inFile = path.join(tmpDir, `in_${Date.now()}.${ext}`);
-  const outFile = path.join(tmpDir, `out_${Date.now()}.webp`);
+  const ext = (media.mimetype || '').split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'bin';
+  const inFile = path.join(tmpDir, `in_${randomUUID()}.${ext}`);
+  const outFile = path.join(tmpDir, `out_${randomUUID()}.webp`);
 
   try {
     await fs.writeFile(inFile, buf);
