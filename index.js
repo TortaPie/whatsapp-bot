@@ -1,6 +1,6 @@
-﻿'use strict';
+'use strict';
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const qrcodeTerminal = require('qrcode-terminal');
 const { randomUUID } = require('crypto');
 const fs = require('fs').promises;
 const path = require('path');
@@ -10,7 +10,39 @@ const ffmpeg = require('fluent-ffmpeg');
 const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
-// ─── Puppeteer opções de baixo consumo de memória ─────────────────────────
+// ─── Pacotes Express e qrcode (para web QR) ───────────────
+const express = require('express');
+const QRCode = require('qrcode');
+const app = express();
+
+let latestQR = null; // Armazena último QR recebido
+
+// Rota para exibir QR code (SVG)
+app.get('/qr', async (req, res) => {
+  if (!latestQR) return res.status(404).send('QR code ainda não gerado.');
+  try {
+    const svg = await QRCode.toString(latestQR, { type: 'svg' });
+    res.type('svg').send(svg);
+  } catch (e) {
+    res.status(500).send('Erro ao gerar SVG do QR.');
+  }
+});
+
+// Home simples
+app.get('/', (req, res) => {
+  res.send(`
+    <h1>QR Code do WhatsApp Bot</h1>
+    <p>Abra <a href="/qr">/qr</a> para ver o QR code atual.</p>
+  `);
+});
+
+// Porta dinâmica para Render/heroku/etc
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log('Servidor web para QR code rodando na porta', PORT);
+});
+
+// ─── Puppeteer opções de baixo consumo de memória ─────────
 const puppeteerOptions = {
   headless: true,
   args: [
@@ -22,12 +54,12 @@ const puppeteerOptions = {
   ]
 };
 
-// ─── Flags de estado e fila de envios ─────────────────────────────────────
+// ─── Flags de estado e fila de envios ─────────────────────
 let isReady = false;
 const pendingSends = [];
 let keepAliveInterval = null;
 
-// ─── Inicialização do client WhatsApp ────────────────────────────────────
+// ─── Inicialização do client WhatsApp ─────────────────────
 const client = new Client({
   authStrategy: new LocalAuth({
     dataPath: process.env.SESSION_PATH || './.wwebjs_auth'
@@ -49,7 +81,7 @@ async function safeSend(to, content, opts = {}) {
   }
 }
 
-// ─── Função de reinicialização robusta ─────────────────────────────────────
+// ─── Função de reinicialização robusta ─────────────────────
 async function restartClient() {
   isReady = false;
   if (keepAliveInterval) {
@@ -60,14 +92,22 @@ async function restartClient() {
   client.initialize();
 }
 
-// ─── Handlers de eventos do client ────────────────────────────────────────
+// ─── Handlers de eventos do client ────────────────────────
 client.on('qr', qr => {
-  console.log('QR recebido, escaneie para autenticar');
+  latestQR = qr; // Atualiza QR para servir via web
+  // Exibe QR também no terminal, com separação visual
+  if (typeof console.clear === 'function') console.clear();
+  const separador = '\n' + '='.repeat(40) + '\n';
+  console.log(separador +
+    'QR Code recebido! Escaneie em /qr para autenticar.' +
+    separador
+  );
   try {
-    qrcode.generate(qr, { small: true });
+    qrcodeTerminal.generate(qr, { small: true });
   } catch (e) {
     console.error('QR generation error:', e);
   }
+  console.log(separador + 'Aguarde a autenticação...' + separador);
 });
 
 client.on('authenticated', () =>
@@ -111,7 +151,7 @@ process.on('uncaughtException', err =>
   console.error('Uncaught Exception:', err)
 );
 
-// ─── Lógica de processamento de mensagens ─────────────────────────────────
+// ─── Lógica de processamento de mensagens ─────────────────
 const greeted = new Set();
 
 client.on('message', async msg => {
